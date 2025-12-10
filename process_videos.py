@@ -2,6 +2,12 @@ import os
 import sys
 import json
 import tempfile
+import io
+import contextlib
+import logging
+import threading
+import time
+import sys as _sys
 from typing import List, Dict, Any
 from cn_asr.formatter import clean_zh_text, split_sentences, group_paragraphs, build_srt_content
 
@@ -43,8 +49,20 @@ def extract_audio(video_path: str, tmp_dir: str) -> str:
 
 def asr_with_funasr(wav_path: str) -> List[Dict[str, Any]]:
     from funasr import AutoModel
-    m = AutoModel(model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc", disable_update=True)
-    res = m.generate(input=wav_path, batch_size=1)
+    logging.getLogger("modelscope").setLevel(logging.ERROR)
+    logging.getLogger("funasr").setLevel(logging.ERROR)
+    logging.getLogger("jieba").setLevel(logging.ERROR)
+    import warnings
+    buf_out = io.StringIO()
+    buf_err = io.StringIO()
+    with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+        warnings.filterwarnings("ignore")
+        logging.disable(logging.CRITICAL)
+        try:
+            m = AutoModel(model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc", disable_update=True)
+            res = m.generate(input=wav_path, batch_size=1)
+        finally:
+            logging.disable(logging.NOTSET)
     items = []
     for r in res:
         tx = r.get("text", "")
@@ -130,6 +148,16 @@ def allocate_times(sent_texts: List[str], total_ms: int) -> List[Dict[str, Any]]
         r[-1]["end"] = max(r[-1]["end"], total_ms)
     return r
 
+def fmt_dur(ms: int) -> str:
+    ms = max(ms, 0)
+    s = ms // 1000
+    h = s // 3600
+    m = (s % 3600) // 60
+    sec = s % 60
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
 def build_outputs_for_video(video_path: str, out_dir: str) -> None:
     ensure_dir(out_dir)
     name = os.path.splitext(os.path.basename(video_path))[0]
@@ -137,7 +165,32 @@ def build_outputs_for_video(video_path: str, out_dir: str) -> None:
     ensure_dir(subdir)
     with tempfile.TemporaryDirectory() as tmp:
         wav = extract_audio(video_path, tmp)
+        total_ms = get_wav_duration_ms(wav)
+        print(f"开始处理: {name}（时长 {fmt_dur(total_ms)}）")
+        # 估算识别耗时，并打印进度
+        rtf = float(os.environ.get("ASR_RTF_ESTIMATE", "0.18"))
+        expected = max(int(total_ms / 1000 * rtf), 6)
+        stop_evt = threading.Event()
+        def progress_loop():
+            start = time.time()
+            last = -1
+            while not stop_evt.is_set():
+                elapsed = time.time() - start
+                pct = int(min(99, max(10, (elapsed / expected) * 80 + 10)))
+                if pct != last:
+                    width = 30
+                    fill = max(0, min(width, int(pct * width / 100)))
+                    bar = "█" * fill + " " * (width - fill)
+                    _sys.stdout.write(f"\r{pct}%|{bar}|")
+                    _sys.stdout.flush()
+                    last = pct
+                time.sleep(1)
+        t = threading.Thread(target=progress_loop, daemon=True)
+        t.start()
         raw = asr_with_funasr(wav)
+        stop_evt.set()
+        _sys.stdout.write("\r90%|" + "█" * 27 + " " * 3 + "|\n")
+        _sys.stdout.flush()
         segs = refine_segments(raw)
         sents = []
         for s in segs:
@@ -155,7 +208,15 @@ def build_outputs_for_video(video_path: str, out_dir: str) -> None:
         srt_txt = build_srt_content(srt_items)
         paras = group_paragraphs(sent_texts, 120)
         from docx import Document
+        from docx.oxml.ns import qn
         doc = Document()
+        try:
+            st = doc.styles["Normal"]
+            fn = "SimHei"
+            st.font.name = fn
+            st._element.rPr.rFonts.set(qn("w:eastAsia"), fn)
+        except Exception:
+            pass
         for p in paras:
             doc.add_paragraph(p)
         srt_path = os.path.join(subdir, name + ".srt")
@@ -163,9 +224,11 @@ def build_outputs_for_video(video_path: str, out_dir: str) -> None:
             f.write(srt_txt)
         docx_path = os.path.join(subdir, name + ".docx")
         doc.save(docx_path)
+        print(f"进度: 100%")
 
 def main() -> None:
-    root = os.path.join(os.getcwd(), "input_videos")
+    root = os.path.join(os.getcwd(), "demoVideo")
+    # root = os.path.join(os.getcwd(), "input_videos/work")
     out_dir = os.path.join(os.getcwd(), "outputs")
     ensure_dir(out_dir)
     ensure_dir(root)
