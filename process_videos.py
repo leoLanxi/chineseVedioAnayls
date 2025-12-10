@@ -227,8 +227,7 @@ def build_outputs_for_video(video_path: str, out_dir: str) -> None:
         print(f"进度: 100%")
 
 def main() -> None:
-    root = os.path.join(os.getcwd(), "demoVideo")
-    # root = os.path.join(os.getcwd(), "input_videos/work")
+    root = os.path.join(os.getcwd(), "input_videos/work")
     out_dir = os.path.join(os.getcwd(), "outputs")
     ensure_dir(out_dir)
     ensure_dir(root)
