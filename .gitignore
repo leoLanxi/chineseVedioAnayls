@@ -1,6 +1,12 @@
 .venv/
-outputs/
 __pycache__/
 *.pyc
 .DS_Store
 
+# generated outputs and local inputs
+outputs/
+outputs/**
+!outputs/.gitkeep
+input_videos/
+input_videos/**
+!input_videos/.gitkeep
